@@ -1,0 +1,931 @@
+const express = require("express");
+const axios = require("axios");
+const fs = require("fs");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+require("dotenv").config();
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const app = express();
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.send("OLX Автоответчик работает");
+});
+
+app.get("/olx/login", (req, res) => {
+  const authUrl =
+    "https://www.olx.kz/oauth/authorize/?" +
+    new URLSearchParams({
+      client_id: process.env.OLX_CLIENT_ID,
+      response_type: "code",
+      scope: process.env.OLX_SCOPE,
+      redirect_uri: process.env.OLX_REDIRECT_URI,
+    }).toString();
+
+  res.redirect(authUrl);
+});
+
+app.get("/olx/callback", async (req, res) => {
+  const code = req.query.code;
+
+  if (!code) {
+    return res.send("Ошибка: OLX не прислал code");
+  }
+
+  try {
+    const response = await axios.post(
+      "https://www.olx.kz/api/open/oauth/token",
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: process.env.OLX_CLIENT_ID,
+        client_secret: process.env.OLX_CLIENT_SECRET,
+        code: code,
+        redirect_uri: process.env.OLX_REDIRECT_URI,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    console.log("TOKENS:", response.data);
+
+    res.send(`
+      <h1>OLX подключен ✅</h1>
+      <p>Токены получены. Посмотри PowerShell.</p>
+      <pre>${JSON.stringify(response.data, null, 2)}</pre>
+    `);
+  } catch (error) {
+    console.error("Ошибка получения токена:", error.response?.data || error.message);
+
+    res.send(`
+      <h1>Ошибка подключения OLX ❌</h1>
+      <pre>${JSON.stringify(error.response?.data || error.message, null, 2)}</pre>
+    `);
+  }
+});
+
+app.get("/olx/threads", async (req, res) => {
+  try {
+    const response = await axios.get("https://www.olx.kz/api/partner/threads", {
+      headers: {
+        Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+        Version: "2.0",
+      },
+    });
+
+    console.log("THREADS:", response.data);
+
+    res.send(`
+      <h1>Диалоги OLX ✅</h1>
+      <pre>${JSON.stringify(response.data, null, 2)}</pre>
+    `);
+  } catch (error) {
+    console.error("Ошибка получения диалогов:", error.response?.data || error.message);
+
+    res.send(`
+      <h1>Ошибка получения диалогов ❌</h1>
+      <pre>${JSON.stringify(error.response?.data || error.message, null, 2)}</pre>
+    `);
+  }
+});
+
+app.get("/olx/messages/:threadId", async (req, res) => {
+  const threadId = req.params.threadId;
+
+  try {
+    const response = await axios.get(
+      `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+          Version: "2.0",
+        },
+      }
+    );
+
+    console.log("MESSAGES:", response.data);
+
+    res.send(`
+      <h1>Сообщения диалога ${threadId} ✅</h1>
+      <pre>${JSON.stringify(response.data, null, 2)}</pre>
+    `);
+  } catch (error) {
+    console.error("Ошибка получения сообщений:", error.response?.data || error.message);
+
+    res.send(`
+      <h1>Ошибка получения сообщений ❌</h1>
+      <pre>${JSON.stringify(error.response?.data || error.message, null, 2)}</pre>
+    `);
+  }
+});
+
+app.get("/olx/test-reply/:threadId", async (req, res) => {
+  const threadId = req.params.threadId;
+
+  try {
+    const response = await axios.post(
+      `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+      {
+        text: "Здравствуйте! Спасибо за сообщение. Да, объявление актуально.",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+          Version: "2.0",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log("REPLY SENT:", response.data);
+
+    res.send(`
+      <h1>Тестовый ответ отправлен ✅</h1>
+      <pre>${JSON.stringify(response.data, null, 2)}</pre>
+    `);
+  } catch (error) {
+    console.error("Ошибка отправки ответа:", error.response?.data || error.message);
+
+    res.send(`
+      <h1>Ошибка отправки ответа ❌</h1>
+      <pre>${JSON.stringify(error.response?.data || error.message, null, 2)}</pre>
+    `);
+  }
+});
+
+const PROCESSED_FILE = "processed.json";
+const HANDOFF_FILE = "handoff.json";
+const READ_THREADS_FILE = "read_threads.json";
+
+function loadReadThreads() {
+  try {
+    if (!fs.existsSync(READ_THREADS_FILE)) {
+      return new Set();
+    }
+
+    const data = fs.readFileSync(READ_THREADS_FILE, "utf8");
+    const ids = JSON.parse(data);
+
+    return new Set(ids);
+  } catch (error) {
+    console.error("Ошибка чтения read_threads.json:", error.message);
+    return new Set();
+  }
+}
+
+function saveReadThreads() {
+  try {
+    fs.writeFileSync(
+      READ_THREADS_FILE,
+      JSON.stringify([...readThreads], null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Ошибка сохранения read_threads.json:", error.message);
+  }
+}
+
+const readThreads = loadReadThreads();
+
+function loadHandoffThreads() {
+  try {
+    if (!fs.existsSync(HANDOFF_FILE)) {
+      return new Set();
+    }
+
+    const data = fs.readFileSync(HANDOFF_FILE, "utf8");
+    const ids = JSON.parse(data);
+
+    return new Set(ids);
+  } catch (error) {
+    console.error("Ошибка чтения handoff.json:", error.message);
+    return new Set();
+  }
+}
+
+function saveHandoffThreads() {
+  try {
+    fs.writeFileSync(
+      HANDOFF_FILE,
+      JSON.stringify([...handoffThreads], null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Ошибка сохранения handoff.json:", error.message);
+  }
+}
+
+const handoffThreads = loadHandoffThreads();
+
+function loadProcessedMessages() {
+  try {
+    if (!fs.existsSync(PROCESSED_FILE)) {
+      return new Set();
+    }
+
+    const data = fs.readFileSync(PROCESSED_FILE, "utf8");
+    const ids = JSON.parse(data);
+
+    return new Set(ids);
+  } catch (error) {
+    console.error("Ошибка чтения processed.json:", error.message);
+    return new Set();
+  }
+}
+
+function saveProcessedMessages() {
+  try {
+    fs.writeFileSync(
+      PROCESSED_FILE,
+      JSON.stringify([...processedMessages], null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Ошибка сохранения processed.json:", error.message);
+  }
+}
+
+const processedMessages = loadProcessedMessages();
+let autoreplyInitialized = false;
+function getItems(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.data)) return data.data;
+  if (Array.isArray(data.items)) return data.items;
+  return [];
+}
+
+async function getThreads() {
+  const response = await axios.get("https://www.olx.kz/api/partner/threads", {
+    headers: {
+      Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+      Version: "2.0",
+    },
+  });
+
+  return getItems(response.data);
+}
+
+async function getMessages(threadId) {
+  const response = await axios.get(
+    `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+        Version: "2.0",
+      },
+    }
+  );
+
+  return getItems(response.data);
+}
+
+async function sendMessage(threadId, text) {
+  const response = await axios.post(
+    `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+    {
+      text,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
+        Version: "2.0",
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  return response.data;
+}
+
+function isIncomingMessage(message) {
+  const type = String(message.type || message.direction || message.sender_type || "").toLowerCase();
+
+  if (type.includes("incoming")) return true;
+  if (type.includes("received")) return true;
+  if (type.includes("buyer")) return true;
+  if (type.includes("user")) return true;
+
+  if (message.author && message.author.type) {
+    const authorType = String(message.author.type).toLowerCase();
+    if (authorType.includes("buyer")) return true;
+  }
+
+  return false;
+}
+
+function getMessageId(message) {
+  return message.id || message.message_id || message.uuid;
+}
+
+function getMessageText(message) {
+  return message.text || message.body || message.message || "";
+}
+
+function generateReply(messageText) {
+  const text = String(messageText || "").toLowerCase();
+
+  if (
+    text.includes("актуально") ||
+    text.includes("есть") ||
+    text.includes("в наличии") ||
+    text.includes("работает") ||
+    text.includes("можно")
+  ) {
+    return "Здравствуйте! Да, актуально. Напишите, пожалуйста, какой именно цифровой товар или услуга вам нужна, и я подскажу варианты.";
+  }
+
+  if (
+    text.includes("цена") ||
+    text.includes("сколько") ||
+    text.includes("почем") ||
+    text.includes("почём") ||
+    text.includes("стоимость") ||
+    text.includes("прайс")
+  ) {
+    return "Здравствуйте! Цена рассчитывается индивидуально и зависит от нужного товара, объёма и условий. Напишите, пожалуйста, что именно вам нужно.";
+  }
+
+  if (
+    text.includes("скидка") ||
+    text.includes("дешевле") ||
+    text.includes("торг") ||
+    text.includes("уступ") ||
+    text.includes("оптом")
+  ) {
+    return "Здравствуйте! Цена индивидуальная, при объёме можем обсудить выгоднее. Напишите, пожалуйста, что именно и в каком количестве вам нужно.";
+  }
+
+  if (
+    text.includes("доставка") ||
+    text.includes("самовывоз") ||
+    text.includes("где забрать") ||
+    text.includes("адрес") ||
+    text.includes("курьер")
+  ) {
+    return "Здравствуйте! Это цифровой товар, доставка и самовывоз не нужны. После согласования всё передаётся онлайн.";
+  }
+
+  if (
+    text.includes("как получить") ||
+    text.includes("как передаете") ||
+    text.includes("как передаёте") ||
+    text.includes("как выдаете") ||
+    text.includes("как выдаёте") ||
+    text.includes("онлайн")
+  ) {
+    return "Здравствуйте! Всё передаётся онлайн после согласования деталей. Напишите, пожалуйста, что именно вам нужно, и я объясню порядок.";
+  }
+
+  if (
+    text.includes("оплата") ||
+    text.includes("оплатить") ||
+    text.includes("kaspi") ||
+    text.includes("каспи") ||
+    text.includes("перевод")
+  ) {
+    return "Здравствуйте! По оплате договоримся после уточнения товара и суммы. Напишите, пожалуйста, что именно вам нужно.";
+  }
+
+  if (
+    text.includes("гарантия") ||
+    text.includes("безопасно") ||
+    text.includes("обман") ||
+    text.includes("кидалово") ||
+    text.includes("проверка")
+  ) {
+    return "Здравствуйте! Понимаю ваш вопрос. Сначала уточним, что именно вам нужно, после этого я объясню условия и порядок получения.";
+  }
+
+  if (
+    text.includes("номер") ||
+    text.includes("телефон") ||
+    text.includes("ватсап") ||
+    text.includes("whatsapp") ||
+    text.includes("wa")
+  ) {
+    return "Здравствуйте! Давайте сначала уточним детали здесь в чате OLX: что именно вам нужно и в каком объёме?";
+  }
+
+  return "Здравствуйте! Напишите, пожалуйста, что именно вам нужно: название цифрового товара/услуги, объём и желаемые условия. После этого я подскажу варианты и цену.";
+}
+
+function isLeadReady(replyText) {
+  const text = String(replyText || "").toLowerCase();
+
+  return (
+    text.includes("продавец уточнит") ||
+    text.includes("уточнит наличие и цену") ||
+    text.includes("передам продавцу") ||
+    text.includes("сейчас продавец") ||
+    text.includes("ожидайте, продавец")
+  );
+}
+
+function isNewRequestAfterHandoff(clientText) {
+  const text = String(clientText || "").toLowerCase();
+
+  return (
+    text.includes("еще") ||
+    text.includes("ещё") ||
+    text.includes("другой") ||
+    text.includes("другая") ||
+    text.includes("другое") ||
+    text.includes("новый") ||
+    text.includes("новая") ||
+    text.includes("теперь") ||
+    text.includes("а есть") ||
+    text.includes("нужен") ||
+    text.includes("нужна") ||
+    text.includes("хочу") ||
+    text.includes("интересует") ||
+    text.includes("steam") ||
+    text.includes("epic") ||
+    text.includes("chatgpt") ||
+    text.includes("чатгпт") ||
+    text.includes("яндекс") ||
+    text.includes("плюс") ||
+    text.includes("подписка") ||
+    text.includes("аккаунт")
+  );
+}
+
+function printLead(threadId, clientText, replyText) {
+  console.log("\n==============================");
+  console.log("🔥 НОВАЯ ЗАЯВКА OLX");
+  console.log("==============================");
+  console.log(`Диалог: ${threadId}`);
+  console.log("");
+  console.log("Сообщения клиента:");
+  console.log(clientText || "Нет текста");
+  console.log("");
+  console.log("Ответ бота:");
+  console.log(replyText || "Нет ответа");
+  console.log("==============================\n");
+}
+
+async function sendTelegramLead(threadId, clientText, replyText, title = "🔥 НОВАЯ ЗАЯВКА OLX") {
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    console.log("Telegram не настроен: нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID");
+    return;
+  }
+
+  const baseUrl = process.env.PUBLIC_BASE_URL || "";
+
+  const message = `
+${title}
+
+Диалог: ${threadId}
+
+Сообщения клиента:
+${clientText || "Нет текста"}
+
+Ответ бота:
+${replyText || "Нет ответа"}
+
+${baseUrl ? `Ссылка на сообщения: ${baseUrl}/olx/messages/${threadId}` : ""}
+`.trim();
+
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text: message.slice(0, 4000),
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "✅ Прочитано",
+                callback_data: `read:${threadId}`,
+              },
+              {
+                text: "👀 Оставить непрочитанным",
+                callback_data: `unread:${threadId}`,
+              },
+            ],
+            [
+              {
+                text: "🔄 Начать заново",
+                callback_data: `reset:${threadId}`,
+              },
+            ],
+          ],
+        },
+      }
+    );
+
+    readThreads.delete(String(threadId));
+    saveReadThreads();
+
+    console.log("Telegram-уведомление отправлено ✅");
+  } catch (error) {
+    console.error("Ошибка Telegram:", error.response?.data || error.message);
+  }
+}
+
+app.post("/tg/webhook", async (req, res) => {
+  try {
+    const callback = req.body.callback_query;
+
+    if (!callback) {
+      return res.sendStatus(200);
+    }
+
+    const data = callback.data || "";
+    const chatId = callback.message?.chat?.id;
+    const messageId = callback.message?.message_id;
+
+    const [action, threadId] = data.split(":");
+
+    if (!threadId) {
+      return res.sendStatus(200);
+    }
+
+    if (action === "read") {
+      readThreads.add(String(threadId));
+      saveReadThreads();
+
+      await axios.post(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+        {
+          callback_query_id: callback.id,
+          text: "Отмечено как прочитано ✅",
+        }
+      );
+    }
+
+    if (action === "unread") {
+      readThreads.delete(String(threadId));
+      saveReadThreads();
+
+      await axios.post(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+        {
+          callback_query_id: callback.id,
+          text: "Оставлено непрочитанным 👀",
+        }
+      );
+    }
+
+    if (action === "reset") {
+      handoffThreads.delete(String(threadId));
+      readThreads.delete(String(threadId));
+      saveHandoffThreads();
+      saveReadThreads();
+
+      await axios.post(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+        {
+          callback_query_id: callback.id,
+          text: "Диалог снова активен для автоответчика 🔄",
+        }
+      );
+    }
+
+    
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Ошибка Telegram webhook:", error.response?.data || error.message);
+    res.sendStatus(200);
+  }
+});
+app.get("/tg/set-webhook", async (req, res) => {
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.PUBLIC_BASE_URL) {
+    return res.send("Нет TELEGRAM_BOT_TOKEN или PUBLIC_BASE_URL");
+  }
+
+  const webhookUrl = `${process.env.PUBLIC_BASE_URL}/tg/webhook`;
+
+  try {
+    const response = await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/setWebhook`,
+      {
+        url: webhookUrl,
+      }
+    );
+
+    res.send(`
+      <h1>Telegram webhook установлен ✅</h1>
+      <pre>${JSON.stringify(response.data, null, 2)}</pre>
+      <p>${webhookUrl}</p>
+    `);
+  } catch (error) {
+    res.send(`
+      <h1>Ошибка установки webhook ❌</h1>
+      <pre>${JSON.stringify(error.response?.data || error.message, null, 2)}</pre>
+    `);
+  }
+});
+
+  
+async function generateAIReply(messageText, conversationHistory = []) {
+  const text = String(messageText || "").trim();
+
+  const fallbackReply = generateReply(text);
+
+  if (!process.env.GEMINI_API_KEY) {
+    return fallbackReply;
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({
+      model: process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
+    });
+
+    const historyText = conversationHistory
+      .slice(-12)
+      .map((msg) => {
+        const role = isIncomingMessage(msg) ? "Клиент" : "Продавец";
+        const msgText = getMessageText(msg);
+        return `${role}: ${msgText}`;
+      })
+      .filter((line) => line.trim() !== "Клиент:" && line.trim() !== "Продавец:")
+      .join("\n");
+
+    const prompt = `
+Ты автоответчик-продавец в OLX Казахстан.
+
+Магазин продаёт цифровые товары и онлайн-услуги:
+- игровые аккаунты и игры, например Steam/Epic;
+- аккаунты и доступы к сервисам;
+- AI-сервисы, например ChatGPT;
+- подписки, например Яндекс Плюс;
+- другие цифровые товары.
+
+Цены индивидуальные и зависят от категории, товара, срока, региона, типа аккаунта, комплектации и условий.
+
+Твоя задача — не продать самостоятельно, а собрать заявку.
+
+Для игр и игровых аккаунтов уточняй:
+- какая игра;
+- платформа, если не понятно: Steam, Epic или другое;
+- полный аккаунт или доступ;
+- нужны ли DLC/издание/комплектация.
+
+Для ChatGPT / AI-сервисов уточняй:
+- какой сервис нужен;
+- нужен аккаунт или подписка;
+- срок;
+- личное использование или несколько пользователей.
+
+Для Яндекс Плюс / подписок уточняй:
+- какая подписка нужна;
+- срок;
+- регион/страна, если важно;
+- один аккаунт или семейный вариант.
+
+Для других цифровых товаров уточняй:
+- что именно нужно;
+- срок/объём;
+- формат получения.
+
+Когда заявка уже понятна, НЕ спрашивай дальше одно и то же.
+Напиши коротко:
+"Понял: [краткое резюме заявки]. Сейчас продавец уточнит наличие и цену."
+
+ТВОЯ ГЛАВНАЯ ЗАДАЧА:
+Не закрывать продажу самостоятельно.
+Не называть цену.
+Не обещать наличие.
+Не выдумывать условия.
+Твоя задача — собрать заявку от клиента и подготовить диалог для живого продавца.
+
+Что нужно выяснить у клиента:
+1. Какая игра нужна?
+2. Какая платформа нужна? Например Steam, Epic Games или другая.
+3. Нужен полный аккаунт или просто доступ?
+4. Нужна обычная версия или с DLC/дополнениями?
+5. Клиент хочет купить сейчас или просто интересуется?
+
+Очень важные правила:
+- Всегда учитывай историю переписки.
+- Не спрашивай повторно то, что клиент уже написал.
+- Если клиент уже назвал игру, не спрашивай игру снова.
+- Если клиент уже написал "без DLC", "обычная версия", "просто доступ", "полный аккаунт" — учитывай это.
+- Если данных ещё не хватает, задай только один самый важный уточняющий вопрос.
+- Если данных уже достаточно, скажи, что понял заявку, и продавец сейчас уточнит наличие и цену.
+- Никогда не называй конкретную цену.
+- Никогда не говори "стоит 500", "от 1000", "примерно".
+- Никогда не обещай, что товар точно есть.
+- Не отправляй клиента в WhatsApp или Telegram первым.
+- Не пиши длинные сообщения.
+- Пиши естественно, как живой продавец.
+- Пиши только на русском языке.
+Если клиент пишет короткими сообщениями подряд, объединяй их в одну заявку.
+Например:
+"Cyberpunk 2077"
+"без DLC"
+"Steam аккаунт"
+означает, что клиенту нужен Steam аккаунт с Cyberpunk 2077 без DLC.
+
+Не спрашивай повторно то, что уже есть в истории.
+Если уже понятны игра, DLC и тип аккаунта, не уточняй их заново.
+Когда заявка достаточно понятна, напиши:
+"Понял, нужен Steam аккаунт с Cyberpunk 2077 без DLC. Сейчас продавец уточнит наличие и цену."
+- Ты обязан учитывать историю переписки.
+
+Когда заявка считается достаточно собранной:
+- известна игра;
+- понятно, нужен полный аккаунт или доступ;
+- понятно, нужна обычная версия или с DLC.
+
+Если заявка собрана, ответь примерно так:
+"Понял вас: [кратко повтори заявку]. Сейчас продавец уточнит наличие и цену."
+
+История переписки:
+${historyText}
+
+Последнее сообщение клиента:
+"${text}"
+
+Ответь одним коротким сообщением от имени продавца.
+`;
+
+    const result = await model.generateContent(prompt);
+    const reply = result.response.text().trim();
+
+    if (!reply) {
+      return fallbackReply;
+    }
+
+    return reply.slice(0, 700);
+  } catch (error) {
+    console.error("Ошибка Gemini:", error.message);
+    return fallbackReply;
+  }
+}
+
+async function autoReplyOnce() {
+  console.log("Проверяю новые сообщения OLX...");
+
+  try {
+    const threads = await getThreads();
+
+    console.log(`Найдено диалогов: ${threads.length}`);
+
+    for (const thread of threads) {
+      const threadId = thread.id || thread.thread_id;
+
+      if (!threadId) continue;
+      
+      let messages = await getMessages(threadId);
+
+      if (!messages.length) continue;
+      
+
+      // Сортируем сообщения от старых к новым
+      messages = messages.sort((a, b) => {
+        const aTime = new Date(a.created_at || a.createdAt || a.date || 0).getTime();
+        const bTime = new Date(b.created_at || b.createdAt || b.date || 0).getTime();
+        return aTime - bTime;
+      });
+
+      // Первый запуск: запоминаем ВСЕ старые сообщения и НЕ отвечаем
+      if (!autoreplyInitialized) {
+        for (const msg of messages) {
+          const oldMessageId = getMessageId(msg);
+          if (oldMessageId) {
+            processedMessages.add(oldMessageId);
+          }
+        }
+
+        saveProcessedMessages();
+        console.log(`Старые сообщения диалога ${threadId} запомнены без ответа`);
+        continue;
+      }
+
+      // Берём все новые входящие сообщения клиента, на которые ещё не отвечали
+      const newIncomingMessages = messages.filter((msg) => {
+        const msgId = getMessageId(msg);
+        return msgId && !processedMessages.has(msgId) && isIncomingMessage(msg);
+      });
+
+      if (!newIncomingMessages.length) {
+        continue;
+      }
+const combinedClientText = newIncomingMessages
+  .map((msg) => getMessageText(msg))
+  .filter(Boolean)
+  .join("\n");
+
+// Если диалог уже передан продавцу
+if (handoffThreads.has(String(threadId))) {
+  if (isNewRequestAfterHandoff(combinedClientText)) {
+    console.log(`Диалог ${threadId}: похоже, клиент хочет новую заявку. Снимаю handoff.`);
+    handoffThreads.delete(String(threadId));
+    readThreads.delete(String(threadId));
+    saveHandoffThreads();
+    saveReadThreads();
+  } else {
+    console.log(`Диалог ${threadId} уже передан продавцу, но клиент написал ещё сообщение`);
+
+    await sendTelegramLead(
+      threadId,
+      combinedClientText,
+      "Клиент написал новое сообщение в уже переданном диалоге. Зайдите и ответьте вручную.",
+      readThreads.has(String(threadId))
+        ? "📩 НОВОЕ СООБЩЕНИЕ В ПРОЧИТАННОМ ДИАЛОГЕ"
+        : "⚠️ ЕЩЁ ОДНО СООБЩЕНИЕ В НЕПРОЧИТАННОМ ДИАЛОГЕ"
+    );
+
+    for (const msg of newIncomingMessages) {
+      const msgId = getMessageId(msg);
+      if (msgId) {
+        processedMessages.add(msgId);
+      }
+    }
+
+    saveProcessedMessages();
+    continue;
+  }
+}
+
+      
+
+      console.log("Новые сообщения клиента:", {
+        threadId,
+        count: newIncomingMessages.length,
+        text: combinedClientText,
+      });
+
+      const replyText = await generateAIReply(combinedClientText, messages);
+
+      await sendMessage(threadId, replyText);
+
+if (isLeadReady(replyText)) {
+  handoffThreads.add(String(threadId));
+  saveHandoffThreads();
+
+  printLead(threadId, combinedClientText, replyText);
+  await sendTelegramLead(threadId, combinedClientText, replyText);
+
+  console.log(`Диалог ${threadId} передан продавцу`);
+}
+      // После одного ответа помечаем ВСЕ новые сообщения клиента как обработанные
+      for (const msg of newIncomingMessages) {
+        const msgId = getMessageId(msg);
+        if (msgId) {
+          processedMessages.add(msgId);
+        }
+      }
+
+      saveProcessedMessages();
+
+      console.log(`Автоответ отправлен в диалог ${threadId}`);
+      console.log(`Ответ: ${replyText}`);
+    }
+
+    if (!autoreplyInitialized) {
+      autoreplyInitialized = true;
+      console.log("Автоответчик инициализирован. Старые сообщения больше не будут трогаться.");
+    }
+  } catch (error) {
+    console.error("Ошибка автоответчика:", error.response?.data || error.message);
+  }
+}
+app.get("/olx/auto-reply-once", async (req, res) => {
+  await autoReplyOnce();
+
+  res.send(`
+    <h1>Проверка автоответчика выполнена ✅</h1>
+    <p>Посмотри PowerShell.</p>
+  `);
+});
+
+app.get("/olx/start-autoreply", async (req, res) => {
+  if (global.autoreplyInterval) {
+    return res.send(`
+      <h1>Автоответчик уже запущен ✅</h1>
+    `);
+  }
+
+  autoreplyInitialized = false;
+  
+
+  await autoReplyOnce();
+
+  global.autoreplyInterval = setInterval(autoReplyOnce, 30000);
+
+  res.send(`
+    <h1>Автоответчик запущен ✅</h1>
+    <p>Старые сообщения запомнены. Теперь бот будет отвечать только на новые сообщения.</p>
+  `);
+});
+
+app.get("/olx/stop-autoreply", (req, res) => {
+  if (global.autoreplyInterval) {
+    clearInterval(global.autoreplyInterval);
+    global.autoreplyInterval = null;
+  }
+
+  res.send(`
+    <h1>Автоответчик остановлен ⛔</h1>
+  `);
+});
+
+app.listen(process.env.PORT, () => {
+  console.log(`Сервер запущен: http://localhost:${process.env.PORT}`);
+});
