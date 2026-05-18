@@ -528,6 +528,72 @@ ${baseUrl ? `Ссылка на сообщения: ${baseUrl}/olx/messages/${thr
 
 app.post("/tg/webhook", async (req, res) => {
   try {
+    const message = req.body.message;
+
+    // Ответ в Telegram свайпом/Reply на уведомление.
+    // Этот текст отправится прямо в нужный OLX-диалог.
+    // Gemini при этом НЕ используется.
+    if (message && message.text && message.reply_to_message) {
+      const replyText = String(message.text || "").trim();
+      const originalText = String(message.reply_to_message.text || "");
+
+      const match = originalText.match(/Диалог:\s*(\d+)/);
+
+      if (!match) {
+        await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: message.chat.id,
+            text: "⚠️ Не нашёл номер диалога. Ответьте именно на уведомление бота, где есть строка «Диалог: ...».",
+          }
+        );
+
+        return res.sendStatus(200);
+      }
+
+      const threadId = match[1];
+
+      if (!replyText) {
+        return res.sendStatus(200);
+      }
+
+      try {
+        await sendMessage(threadId, replyText);
+
+        // После твоего ручного ответа диалог считается переданным продавцу.
+        // Дальше бот сам не отвечает, а только присылает новые сообщения в Telegram.
+        handoffThreads.add(String(threadId));
+        readThreads.add(String(threadId));
+        saveHandoffThreads();
+        saveReadThreads();
+
+        await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: message.chat.id,
+            text: `✅ Ответ отправлен в OLX\n\nДиалог: ${threadId}\n\nТекст:\n${replyText}`,
+          }
+        );
+
+        console.log(`Ответ из Telegram отправлен в OLX диалог ${threadId}: ${replyText}`);
+      } catch (error) {
+        console.error(
+          "Ошибка отправки Telegram-ответа в OLX:",
+          error.response?.data || error.message
+        );
+
+        await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: message.chat.id,
+            text: `❌ Не получилось отправить ответ в OLX.\n\nДиалог: ${threadId}\n\nОшибка:\n${JSON.stringify(error.response?.data || error.message, null, 2).slice(0, 1500)}`,
+          }
+        );
+      }
+
+      return res.sendStatus(200);
+    }
+
     const callback = req.body.callback_query;
 
     if (!callback) {
@@ -535,16 +601,13 @@ app.post("/tg/webhook", async (req, res) => {
     }
 
     const data = callback.data || "";
-    const chatId = callback.message?.chat?.id;
-    const messageId = callback.message?.message_id;
-
-    const [action, threadId] = data.split(":");
+    const threadId = data.split(":")[1];
 
     if (!threadId) {
       return res.sendStatus(200);
     }
 
-    if (action === "read") {
+    if (data.startsWith("read:")) {
       readThreads.add(String(threadId));
       saveReadThreads();
 
@@ -557,7 +620,7 @@ app.post("/tg/webhook", async (req, res) => {
       );
     }
 
-    if (action === "unread") {
+    if (data.startsWith("unread:")) {
       readThreads.delete(String(threadId));
       saveReadThreads();
 
@@ -570,7 +633,7 @@ app.post("/tg/webhook", async (req, res) => {
       );
     }
 
-    if (action === "reset") {
+    if (data.startsWith("reset:")) {
       handoffThreads.delete(String(threadId));
       readThreads.delete(String(threadId));
       saveHandoffThreads();
@@ -585,11 +648,10 @@ app.post("/tg/webhook", async (req, res) => {
       );
     }
 
-    
-    res.sendStatus(200);
+    return res.sendStatus(200);
   } catch (error) {
     console.error("Ошибка Telegram webhook:", error.response?.data || error.message);
-    res.sendStatus(200);
+    return res.sendStatus(200);
   }
 });
 app.get("/tg/set-webhook", async (req, res) => {
