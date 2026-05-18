@@ -689,7 +689,11 @@ async function generateAIReply(messageText, conversationHistory = []) {
   const fallbackReply = generateReply(text);
 
   if (!process.env.GEMINI_API_KEY) {
-    return fallbackReply;
+    return {
+      text: fallbackReply,
+      usedFallback: true,
+      fallbackReason: "Нет GEMINI_API_KEY",
+    };
   }
 
   try {
@@ -810,13 +814,26 @@ ${historyText}
     const reply = result.response.text().trim();
 
     if (!reply) {
-      return fallbackReply;
+      return {
+        text: fallbackReply,
+        usedFallback: true,
+        fallbackReason: "Gemini вернул пустой ответ",
+      };
     }
 
-    return reply.slice(0, 700);
+    return {
+      text: reply.slice(0, 700),
+      usedFallback: false,
+      fallbackReason: "",
+    };
   } catch (error) {
     console.error("Ошибка Gemini:", error.message);
-    return fallbackReply;
+
+    return {
+      text: fallbackReply,
+      usedFallback: true,
+      fallbackReason: error.message,
+    };
   }
 }
 
@@ -913,9 +930,21 @@ async function autoReplyOnce() {
         text: combinedClientText,
       });
 
-      const replyText = await generateAIReply(combinedClientText, messages);
+      const replyResult = await generateAIReply(combinedClientText, messages);
+const replyText = replyResult.text;
 
-      await sendMessage(threadId, replyText);
+await sendMessage(threadId, replyText);
+
+if (replyResult.usedFallback) {
+  await sendTelegramLead(
+    threadId,
+    combinedClientText,
+    `Бот отправил шаблонный ответ, потому что Gemini недоступен или лимит закончился.\n\nПричина:\n${replyResult.fallbackReason}\n\nШаблонный ответ:\n${replyText}`,
+    "⚠️ GEMINI НЕДОСТУПЕН — ОТПРАВЛЕН ШАБЛОН"
+  );
+
+  console.log(`Gemini недоступен, отправлен шаблон и Telegram-уведомление по диалогу ${threadId}`);
+}
 
       if (isLeadReady(replyText)) {
         handoffThreads.add(String(threadId));
