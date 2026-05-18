@@ -811,7 +811,7 @@ if (!autoreplyInitialized && process.env.SKIP_OLD_ON_START === "true") {
       });
 
       if (!newIncomingMessages.length) {
-        continue;
+        return;
       }
 const combinedClientText = newIncomingMessages
   .map((msg) => getMessageText(msg))
