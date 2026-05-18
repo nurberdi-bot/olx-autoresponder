@@ -770,11 +770,10 @@ async function autoReplyOnce() {
       const threadId = thread.id || thread.thread_id;
 
       if (!threadId) continue;
-      
+
       let messages = await getMessages(threadId);
 
       if (!messages.length) continue;
-      
 
       // Сортируем сообщения от старых к новым
       messages = messages.sort((a, b) => {
@@ -784,20 +783,15 @@ async function autoReplyOnce() {
       });
 
       // Первый запуск нужен только локально при ручном тесте.
-// На хостинге cron сам вызывает /olx/auto-reply-once,
-// поэтому не пропускаем новые сообщения как "старые".
-if (!autoreplyInitialized && process.env.SKIP_OLD_ON_START === "true") {
-  for (const msg of messages) {
-    const oldMessageId = getMessageId(msg);
-    if (oldMessageId) {
-      processedMessages.add(oldMessageId);
-    }
-  }
-
-  saveProcessedMessages();
-  console.log(`Старые сообщения диалога ${threadId} запомнены без ответа`);
-  continue;
-}
+      // На хостинге cron сам вызывает /olx/auto-reply-once,
+      // поэтому не пропускаем новые сообщения как "старые".
+      if (!autoreplyInitialized && process.env.SKIP_OLD_ON_START === "true") {
+        for (const msg of messages) {
+          const oldMessageId = getMessageId(msg);
+          if (oldMessageId) {
+            processedMessages.add(oldMessageId);
+          }
+        }
 
         saveProcessedMessages();
         console.log(`Старые сообщения диалога ${threadId} запомнены без ответа`);
@@ -811,46 +805,45 @@ if (!autoreplyInitialized && process.env.SKIP_OLD_ON_START === "true") {
       });
 
       if (!newIncomingMessages.length) {
-        return;
+        continue;
       }
-const combinedClientText = newIncomingMessages
-  .map((msg) => getMessageText(msg))
-  .filter(Boolean)
-  .join("\n");
 
-// Если диалог уже передан продавцу
-if (handoffThreads.has(String(threadId))) {
-  if (isNewRequestAfterHandoff(combinedClientText)) {
-    console.log(`Диалог ${threadId}: похоже, клиент хочет новую заявку. Снимаю handoff.`);
-    handoffThreads.delete(String(threadId));
-    readThreads.delete(String(threadId));
-    saveHandoffThreads();
-    saveReadThreads();
-  } else {
-    console.log(`Диалог ${threadId} уже передан продавцу, но клиент написал ещё сообщение`);
+      const combinedClientText = newIncomingMessages
+        .map((msg) => getMessageText(msg))
+        .filter(Boolean)
+        .join("\n");
 
-    await sendTelegramLead(
-      threadId,
-      combinedClientText,
-      "Клиент написал новое сообщение в уже переданном диалоге. Зайдите и ответьте вручную.",
-      readThreads.has(String(threadId))
-        ? "📩 НОВОЕ СООБЩЕНИЕ В ПРОЧИТАННОМ ДИАЛОГЕ"
-        : "⚠️ ЕЩЁ ОДНО СООБЩЕНИЕ В НЕПРОЧИТАННОМ ДИАЛОГЕ"
-    );
+      // Если диалог уже передан продавцу
+      if (handoffThreads.has(String(threadId))) {
+        if (isNewRequestAfterHandoff(combinedClientText)) {
+          console.log(`Диалог ${threadId}: похоже, клиент хочет новую заявку. Снимаю handoff.`);
+          handoffThreads.delete(String(threadId));
+          readThreads.delete(String(threadId));
+          saveHandoffThreads();
+          saveReadThreads();
+        } else {
+          console.log(`Диалог ${threadId} уже передан продавцу, но клиент написал ещё сообщение`);
 
-    for (const msg of newIncomingMessages) {
-      const msgId = getMessageId(msg);
-      if (msgId) {
-        processedMessages.add(msgId);
+          await sendTelegramLead(
+            threadId,
+            combinedClientText,
+            "Клиент написал новое сообщение в уже переданном диалоге. Зайдите и ответьте вручную.",
+            readThreads.has(String(threadId))
+              ? "📩 НОВОЕ СООБЩЕНИЕ В ПРОЧИТАННОМ ДИАЛОГЕ"
+              : "⚠️ ЕЩЁ ОДНО СООБЩЕНИЕ В НЕПРОЧИТАННОМ ДИАЛОГЕ"
+          );
+
+          for (const msg of newIncomingMessages) {
+            const msgId = getMessageId(msg);
+            if (msgId) {
+              processedMessages.add(msgId);
+            }
+          }
+
+          saveProcessedMessages();
+          continue;
+        }
       }
-    }
-
-    saveProcessedMessages();
-    continue;
-  }
-}
-
-      
 
       console.log("Новые сообщения клиента:", {
         threadId,
@@ -862,15 +855,16 @@ if (handoffThreads.has(String(threadId))) {
 
       await sendMessage(threadId, replyText);
 
-if (isLeadReady(replyText)) {
-  handoffThreads.add(String(threadId));
-  saveHandoffThreads();
+      if (isLeadReady(replyText)) {
+        handoffThreads.add(String(threadId));
+        saveHandoffThreads();
 
-  printLead(threadId, combinedClientText, replyText);
-  await sendTelegramLead(threadId, combinedClientText, replyText);
+        printLead(threadId, combinedClientText, replyText);
+        await sendTelegramLead(threadId, combinedClientText, replyText);
 
-  console.log(`Диалог ${threadId} передан продавцу`);
-}
+        console.log(`Диалог ${threadId} передан продавцу`);
+      }
+
       // После одного ответа помечаем ВСЕ новые сообщения клиента как обработанные
       for (const msg of newIncomingMessages) {
         const msgId = getMessageId(msg);
