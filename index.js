@@ -785,7 +785,7 @@ async function autoReplyOnce() {
       // Первый запуск нужен только локально при ручном тесте.
       // На хостинге cron сам вызывает /olx/auto-reply-once,
       // поэтому не пропускаем новые сообщения как "старые".
-      if (!autoreplyInitialized && process.env.SKIP_OLD_ON_START === "true") {
+      if (!autoreplyInitialized) {
         for (const msg of messages) {
           const oldMessageId = getMessageId(msg);
           if (oldMessageId) {
