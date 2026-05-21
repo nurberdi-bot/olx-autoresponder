@@ -190,6 +190,160 @@ function saveReadThreads() {
 
 const readThreads = loadReadThreads();
 
+const OLX_TOKENS_FILE = "olx_tokens.json";
+
+function loadOlxTokens() {
+  try {
+    if (fs.existsSync(OLX_TOKENS_FILE)) {
+      const data = fs.readFileSync(OLX_TOKENS_FILE, "utf8");
+      const tokens = JSON.parse(data);
+
+      return {
+        access_token: tokens.access_token || process.env.OLX_ACCESS_TOKEN,
+        refresh_token: tokens.refresh_token || process.env.OLX_REFRESH_TOKEN,
+        expires_at: tokens.expires_at || 0,
+      };
+    }
+  } catch (error) {
+    console.error("Ошибка чтения olx_tokens.json:", error.message);
+  }
+
+  return {
+    access_token: process.env.OLX_ACCESS_TOKEN,
+    refresh_token: process.env.OLX_REFRESH_TOKEN,
+    expires_at: 0,
+  };
+}
+
+function saveOlxTokens(tokens) {
+  try {
+    fs.writeFileSync(
+      OLX_TOKENS_FILE,
+      JSON.stringify(tokens, null, 2),
+      "utf8"
+    );
+
+    process.env.OLX_ACCESS_TOKEN = tokens.access_token;
+    process.env.OLX_REFRESH_TOKEN = tokens.refresh_token;
+
+    console.log("OLX токены сохранены ✅");
+  } catch (error) {
+    console.error("Ошибка сохранения olx_tokens.json:", error.message);
+  }
+}
+
+async function refreshOlxToken() {
+  const currentTokens = loadOlxTokens();
+
+  if (!currentTokens.refresh_token) {
+    throw new Error("Нет OLX_REFRESH_TOKEN для обновления токена");
+  }
+
+  console.log("Обновляю OLX access token через refresh token...");
+
+  try {
+    const response = await axios.post(
+      "https://www.olx.kz/api/open/oauth/token",
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: process.env.OLX_CLIENT_ID,
+        client_secret: process.env.OLX_CLIENT_SECRET,
+        refresh_token: currentTokens.refresh_token,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    const data = response.data;
+
+    const newTokens = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || currentTokens.refresh_token,
+      expires_at: Date.now() + Number(data.expires_in || 86400) * 1000,
+    };
+
+    saveOlxTokens(newTokens);
+
+    console.log("OLX access token обновлён ✅");
+
+    return newTokens.access_token;
+  } catch (error) {
+    console.error("Ошибка обновления OLX токена:", error.response?.data || error.message);
+
+    await sendTelegramSystemMessage(
+      "⚠️ OLX refresh_token не сработал. Нужно заново пройти OAuth и получить fresh access_token + refresh_token."
+    );
+
+    throw error;
+  }
+}
+
+async function sendTelegramSystemMessage(text) {
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    console.log("Telegram не настроен, системное сообщение не отправлено");
+    return;
+  }
+
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text,
+      }
+    );
+  } catch (error) {
+    console.error("Ошибка системного Telegram-сообщения:", error.response?.data || error.message);
+  }
+}
+
+async function olxRequest(config, retry = true) {
+  const tokens = loadOlxTokens();
+
+  const responseConfig = {
+    ...config,
+    headers: {
+      ...(config.headers || {}),
+      Authorization: `Bearer ${tokens.access_token}`,
+      Version: "2.0",
+    },
+  };
+
+  try {
+    return await axios(responseConfig);
+  } catch (error) {
+    const status = error.response?.status;
+    const olxError = error.response?.data?.error;
+
+    const tokenInvalid =
+      status === 401 ||
+      olxError === "invalid_token" ||
+      String(error.response?.data?.error_description || "")
+        .toLowerCase()
+        .includes("token");
+
+    if (retry && tokenInvalid) {
+      console.log("OLX token invalid. Пробую refresh...");
+
+      const newAccessToken = await refreshOlxToken();
+
+      return await axios({
+        ...config,
+        headers: {
+          ...(config.headers || {}),
+          Authorization: `Bearer ${newAccessToken}`,
+          Version: "2.0",
+        },
+      });
+    }
+
+    throw error;
+  }
+}
+
 function loadHandoffThreads() {
   try {
     if (!fs.existsSync(HANDOFF_FILE)) {
@@ -258,44 +412,34 @@ function getItems(data) {
 }
 
 async function getThreads() {
-  const response = await axios.get("https://www.olx.kz/api/partner/threads", {
-    headers: {
-      Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
-      Version: "2.0",
-    },
+  const response = await olxRequest({
+    method: "GET",
+    url: "https://www.olx.kz/api/partner/threads",
   });
 
   return getItems(response.data);
 }
 
 async function getMessages(threadId) {
-  const response = await axios.get(
-    `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
-        Version: "2.0",
-      },
-    }
-  );
+  const response = await olxRequest({
+    method: "GET",
+    url: `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+  });
 
   return getItems(response.data);
 }
 
 async function sendMessage(threadId, text) {
-  const response = await axios.post(
-    `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
-    {
+  const response = await olxRequest({
+    method: "POST",
+    url: `https://www.olx.kz/api/partner/threads/${threadId}/messages`,
+    data: {
       text,
     },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OLX_ACCESS_TOKEN}`,
-        Version: "2.0",
-        "Content-Type": "application/json",
-      },
-    }
-  );
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
 
   return response.data;
 }
