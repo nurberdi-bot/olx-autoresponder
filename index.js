@@ -1222,7 +1222,12 @@ async function autoReplyOnce() {
 const normalizedClientText = String(combinedClientText || "").toLowerCase().trim();
 
 if (normalizedClientText.includes("!инструкции")) {
-  if (instructionsThreads.has(String(threadId))) {
+  const instructionsWereOffered = messages.some((msg) =>
+  !isIncomingMessage(msg) &&
+  String(getMessageText(msg) || "").toLowerCase().includes("!инструкции")
+);
+
+if (instructionsThreads.has(String(threadId)) || instructionsWereOffered) {
     await sendMessage(threadId, STEAM_INSTRUCTIONS_TEXT);
 
     for (const msg of newIncomingMessages) {
