@@ -804,8 +804,7 @@ ${baseUrl ? `Ссылка на сообщения: ${baseUrl}/olx/messages/${thr
       }
     );
 
-    readThreads.delete(String(threadId));
-    saveReadThreads();
+   
 
     console.log("Telegram-уведомление отправлено ✅");
   } catch (error) {
@@ -895,17 +894,20 @@ app.post("/tg/webhook", async (req, res) => {
     }
 
     if (data.startsWith("read:")) {
-      readThreads.add(String(threadId));
-      saveReadThreads();
+  readThreads.add(String(threadId));
+  handoffThreads.add(String(threadId));
 
-      await axios.post(
-        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
-        {
+  saveReadThreads();
+  saveHandoffThreads();
+
+        await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+          {
           callback_query_id: callback.id,
-          text: "Отмечено как прочитано ✅",
-        }
-      );
-    }
+          text: "Отмечено как прочитано ✅ Автоответчик не будет сам отвечать в этот диалог.",
+          }
+       );
+     }
 
     if (data.startsWith("unread:")) {
       readThreads.delete(String(threadId));
@@ -1284,6 +1286,30 @@ if (normalizedClientText.includes("!помощь")) {
 
   saveProcessedMessages();
 
+  continue;
+}
+      // Если диалог отмечен как прочитанный,
+// бот НЕ отвечает сам, но присылает уведомление в Telegram.
+// Команды !инструкции и !помощь уже обработаны выше.
+if (readThreads.has(String(threadId))) {
+  console.log(`Диалог ${threadId} отмечен как прочитанный. Отправляю уведомление без автоответа.`);
+
+  await sendTelegramLead(
+    threadId,
+    combinedClientText,
+    "Клиент написал новое сообщение в прочитанном диалоге. Автоответчик не отвечал. Ответьте вручную из Telegram или OLX.",
+    "📩 НОВОЕ СООБЩЕНИЕ В ПРОЧИТАННОМ ДИАЛОГЕ",
+    clientName
+  );
+
+  for (const msg of newIncomingMessages) {
+    const msgId = getMessageId(msg);
+    if (msgId) {
+      processedMessages.add(msgId);
+    }
+  }
+
+  saveProcessedMessages();
   continue;
 }
 
